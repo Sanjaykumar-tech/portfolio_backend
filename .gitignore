@@ -1,0 +1,24 @@
+# Node.js
+/node_modules/
+npm-debug.log
+
+# Environment files
+.env
+*.env
+
+# System files
+.DS_Store
+Thumbs.db
+
+# IDE/Editor
+.vscode/
+.idea/
+*.swp
+
+# Frontend generated files (if applicable)
+*.jpg  # Only add if profile-1.jpg/profile-2.png are generated files
+*.png
+*.pdf  # Only add if PDFs are generated outputs
+
+# Logs
+*.log
