@@ -169,7 +169,7 @@ app.post('/send', sanitizeInput, validateContactInput, async (req, res) => {
 });
 
 // Health check endpoint
-app.get('/health', (req, res) => {
+app.get('/health', (_req, res) => {
   res.status(200).json({ 
     status: 'healthy',
     timestamp: new Date().toISOString(),
@@ -178,12 +178,12 @@ app.get('/health', (req, res) => {
 });
 
 // 404 handler
-app.use((req, res) => {
+app.use((_req, res) => {
   res.status(404).json({ error: 'Not found' });
 });
 
 // Error handler
-app.use((err, req, res, next) => {
+app.use((err, _req, res, _next) => {
   console.error('Server error:', err);
   res.status(500).json({ 
     error: 'Internal server error',
