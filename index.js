@@ -3,12 +3,12 @@ import cors from 'cors';
 import nodemailer from 'nodemailer';
 import dotenv from 'dotenv';
 import { rateLimit } from 'express-rate-limit';
-import helmet from 'helmet'; // Additional security headers
+import helmet from 'helmet';
 
 dotenv.config();
 
-// Validate required environment variables
-const requiredEnvVars = ['MAIL_USER', 'MAIL_PASS'];
+// Validate environment variables
+const requiredEnvVars = ['MAIL_USER', 'MAIL_PASS', 'ALLOWED_ORIGINS'];
 for (const envVar of requiredEnvVars) {
   if (!process.env[envVar]) {
     console.error(`Missing required environment variable: ${envVar}`);
@@ -19,21 +19,40 @@ for (const envVar of requiredEnvVars) {
 const app = express();
 const PORT = process.env.PORT || 5500;
 
-// Security middleware
-app.use(helmet()); // Adds various security headers
+// Parse allowed origins from environment variable
+const allowedOrigins = process.env.ALLOWED_ORIGINS.split(',').map(origin => origin.trim());
+
+// Enhanced security middleware
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", "data:"],
+      connectSrc: ["'self'"],
+    }
+  }
+}));
 app.disable('x-powered-by');
 
-// Enhanced CORS configuration
-const corsOptions = {
-  origin: [
-    'https://sanjaykumar-tech.github.io',
-    'http://localhost:3000' // For local testing
-  ],
+// CORS configuration
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    
+    const msg = `CORS policy does not allow access from ${origin}`;
+    return callback(new Error(msg), false);
+  },
   methods: ['POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type'],
-  optionsSuccessStatus: 200 // For legacy browser support
-};
-app.use(cors(corsOptions));
+  credentials: true
+}));
 
 // Body parsing with size limit
 app.use(express.json({ limit: '10kb' }));
@@ -41,73 +60,92 @@ app.use(express.json({ limit: '10kb' }));
 // Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 50,
-  message: 'Too many requests from this IP, please try again later',
+  max: 50, // limit each IP to 50 requests per windowMs
+  message: 'Too many requests, please try again later',
   standardHeaders: true,
   legacyHeaders: false
 });
 app.use('/send', limiter);
 
-// Basic request sanitization
+// Input sanitization middleware
 const sanitizeInput = (req, res, next) => {
-  for (const [key, value] of Object.entries(req.body)) {
-    if (typeof value === 'string') {
-      req.body[key] = value.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  try {
+    for (const [key, value] of Object.entries(req.body)) {
+      if (typeof value === 'string') {
+        req.body[key] = value.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      }
     }
+    next();
+  } catch (error) {
+    console.error('Sanitization error:', error);
+    res.status(500).json({ error: 'Internal server error during input sanitization' });
   }
-  next();
 };
 
 // Input validation middleware
 const validateContactInput = (req, res, next) => {
-  const { name, email, subject, phone, message } = req.body;
-  
-  if (!name || !email || !subject || !phone || !message) {
-    return res.status(400).json({ error: 'All fields are required' });
+  try {
+    const { name, email, message, phone = '' } = req.body;
+    
+    if (!name || !email || !message) {
+      return res.status(400).json({ error: 'Name, email and message are required' });
+    }
+    
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: 'Invalid email format' });
+    }
+    
+    if (message.length > 1000) {
+      return res.status(400).json({ error: 'Message too long (max 1000 characters)' });
+    }
+    
+    if (phone && phone.length > 20) {
+      return res.status(400).json({ error: 'Phone number too long (max 20 characters)' });
+    }
+    
+    next();
+  } catch (error) {
+    console.error('Validation error:', error);
+    res.status(500).json({ error: 'Internal server error during input validation' });
   }
-  
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return res.status(400).json({ error: 'Invalid email format' });
-  }
-  
-  if (message.length > 1000) {
-    return res.status(400).json({ error: 'Message too long (max 1000 chars)' });
-  }
-  
-  if (phone.length > 20) {
-    return res.status(400).json({ error: 'Phone number too long' });
-  }
-  
-  next();
 };
 
-// POST route with validation and sanitization
-app.post('/send', sanitizeInput, validateContactInput, async (req, res) => {
-  const { name, email, subject, phone, message } = req.body;
+// Email transporter configuration
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.MAIL_USER,
+    pass: process.env.MAIL_PASS
+  },
+  tls: {
+    rejectUnauthorized: false // Required for Render.com
+  }
+});
 
-  // Configure transporter with better options
-  const transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-      user: process.env.MAIL_USER,
-      pass: process.env.MAIL_PASS
-    },
-    pool: true,
-    maxConnections: 5,
-    maxMessages: 10
-  });
+// Verify transporter connection
+transporter.verify((error) => {
+  if (error) {
+    console.error('Error with mail transporter:', error);
+  } else {
+    console.log('Mail transporter is ready to send emails');
+  }
+});
+
+// Contact form endpoint
+app.post('/send', sanitizeInput, validateContactInput, async (req, res) => {
+  const { name, email, subject = 'General Inquiry', phone = '', message } = req.body;
 
   const mailOptions = {
     from: `"Portfolio Contact" <${process.env.MAIL_USER}>`,
     replyTo: email,
-    to: process.env.RECIPIENT_EMAIL || 'sanjaykumar.techdev@gmail.com',
-    subject: `Portfolio Contact: ${subject.substring(0, 100)}`, // Limit subject length
-    text: `Name: ${name}\nEmail: ${email}\nPhone: ${phone}\n\nMessage:\n${message}`,
+    to: process.env.MAIL_USER,
+    subject: `New Message: ${subject.substring(0, 100)}`,
+    text: `Name: ${name}\nEmail: ${email}\nPhone: ${phone || 'N/A'}\n\nMessage:\n${message}`,
     html: `
       <h2>New Contact Form Submission</h2>
       <p><strong>Name:</strong> ${name}</p>
       <p><strong>Email:</strong> ${email}</p>
-      <p><strong>Phone:</strong> ${phone}</p>
+      ${phone ? `<p><strong>Phone:</strong> ${phone}</p>` : ''}
       <p><strong>Subject:</strong> ${subject}</p>
       <h3>Message:</h3>
       <p>${message.replace(/\n/g, '<br>')}</p>
@@ -117,22 +155,15 @@ app.post('/send', sanitizeInput, validateContactInput, async (req, res) => {
   try {
     await transporter.sendMail(mailOptions);
     res.status(200).json({ 
-      success: true,
+      success: true, 
       message: 'Message sent successfully' 
     });
   } catch (error) {
-    console.error('Email send error:', error);
-    
-    let errorMessage = 'Failed to send message. Please try again later.';
-    if (error.code === 'EAUTH') {
-      errorMessage = 'Authentication failed. Please check email settings.';
-    } else if (error.code === 'EENVELOPE') {
-      errorMessage = 'Invalid email parameters.';
-    }
-    
+    console.error('Email sending error:', error);
     res.status(500).json({ 
       success: false,
-      error: errorMessage 
+      error: 'Failed to send message',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
@@ -141,7 +172,8 @@ app.post('/send', sanitizeInput, validateContactInput, async (req, res) => {
 app.get('/health', (req, res) => {
   res.status(200).json({ 
     status: 'healthy',
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime()
   });
 });
 
@@ -150,18 +182,16 @@ app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });
 });
 
-// Error handling middleware
+// Error handler
 app.use((err, req, res, next) => {
-  console.error(err.stack);
+  console.error('Server error:', err);
   res.status(500).json({ 
     error: 'Internal server error',
-    message: process.env.NODE_ENV === 'development' ? err.message : undefined
+    details: process.env.NODE_ENV === 'development' ? err.message : undefined
   });
 });
 
+// Start server
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  if (process.env.NODE_ENV === 'production') {
-    console.log('Running in production mode');
-  }
 });
