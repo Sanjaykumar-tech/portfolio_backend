@@ -1,3 +1,6 @@
+
+// Description: A secure and efficient Node.js backend for a portfolio contact form,
+
 import express from 'express';
 import cors from 'cors';
 import nodemailer from 'nodemailer';
